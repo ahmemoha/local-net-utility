@@ -33,7 +33,7 @@
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/your-username/local-net-utility.git
+   git clone https://github.com/ahmemoha/local-net-utility.git
    cd local-net-utility
 2. **Serve the application** (Recommended)
    ```bash
