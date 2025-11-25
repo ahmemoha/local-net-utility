@@ -26,6 +26,9 @@ This project is a sophisticated web-based network simulation tool designed to de
 - **Authentication**: Integrated Firebase Authentication (Anonymous/Custom) for user-specific data isolation
 - **Local Dev Support**: Includes `Makefile` and Python HTTP server support for easy local testing
 
+
+<img width="1917" height="1011" alt="Screenshot 2025-11-25 001310" src="https://github.com/user-attachments/assets/938c189e-2abe-4a2b-b08c-ee3bb609b72c" />
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -72,6 +75,8 @@ make help	##Displays available commands
 - Click **"Run Network Scan"** to trigger the diagnostic simulation
 
 - Watch the **Activity Log** for real-time feedback
+- 
+<img width="1913" height="1015" alt="Screenshot 2025-11-25 00162df" src="https://github.com/user-attachments/assets/6d721719-d0d6-489a-88d0-150be649a2fa" />
 
 ## 📂 Project Structure
 
