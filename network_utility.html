@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Local Network Diagnostics Utility</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+    <!-- Load Lucide Icons for professional UI elements -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        :root {
+            font-family: 'Inter', sans-serif;
+            --terminal-green: #4ade80; /* Consistent color name */
+            --terminal-bg: #1a1a2e;
+        }
+        /* Applied text shadow for 'screen glow' effect, making it look less flat */
+        .text-neon-blue { color: var(--terminal-green); text-shadow: 0 0 5px rgba(74, 222, 128, 0.5); } 
+        .bg-dark-terminal { background-color: var(--terminal-bg); }
+        .border-neon-blue { border-color: var(--terminal-green); }
+
+        /* Custom scrollbar */
+        #log-output::-webkit-scrollbar { width: 6px; }
+        #log-output::-webkit-scrollbar-thumb { background: var(--terminal-green); border-radius: 3px; }
+        #log-output::-webkit-scrollbar-track { background: var(--terminal-bg); }
+
+        /* Keyframe for button hover pulse */
+        @keyframes pulse-light {
+            0%, 100% { box-shadow: 0 0 0 rgba(74, 222, 128, 0.4); }
+            50% { box-shadow: 0 0 10px rgba(74, 222, 128, 0.9); }
+        }
+        .btn-neon-hover:hover {
+            animation: pulse-light 1s infinite;
+        }
+        /* Status dots remain standard */
+
+        /* --- CRT/Glitched Style for 'Human' Look --- */
+        /* Subtle glow/shadow on containers to break up flat design */
+        .shadow-glitch {
+            box-shadow: 0 0 15px rgba(74, 222, 128, 0.2), 0 0 5px rgba(255, 255, 255, 0.1);
+        }
+
+        /* Add subtle screen curvature and scanlines to the main log panel */
+        .crt-effect {
+            position: relative;
+            overflow: hidden; /* Important for containing scanlines */
+        }
+        .crt-effect::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            /* Scanline pattern for a subtle retro feel */
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0, 0, 0, 0.15),
+                rgba(0, 0, 0, 0.15) 1px,
+                transparent 1px,
+                transparent 3px
+            );
+            pointer-events: none; /* Allows clicks to pass through */
+            opacity: 0.7;
+            /* Slight curvature effect - makes it feel less like a perfect rectangle */
+            transform: perspective(100px) rotateX(1deg); 
+            transform-origin: top center;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex flex-col">
+
+    <!-- Firebase SDK Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables provided by the Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'local-network-app-default';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app;
+        let db;
+        let auth;
+        let currentUserId = null;
+        let isAuthReady = false;
+
+        // State Management
+        let deviceList = [];
+        let logEntries = [];
+        let isScanning = false;
+        const MAX_LOG_LINES = 100;
+
+        /**
+         * Converts a numerical IP segment to a string.
+         * @param {number} segment
+         * @returns {string}
+         */
+        const ipSegmentToString = (segment) => String(segment).padStart(3, '0');
+
+        /**
+         * Generates a realistic but random MAC address.
+         * @returns {string}
+         */
+        const generateMacAddress = () => {
+            const hexDigits = '0123456789ABCDEF';
+            let mac = '';
+            for (let i = 0; i < 12; i++) {
+                mac += hexDigits[Math.floor(Math.random() * 16)];
+                if (i % 2 === 1 && i < 10) {
+                    mac += ':';
+                }
+            }
+            return mac;
+        };
+
+        /**
+         * Utility to append a message to the application log.
+         * @param {string} message - The message to log.
+         * @param {string} level - Log level ('INFO', 'WARN', 'ERROR').
+         */
+        const appendLog = (message, level = 'INFO') => {
+            const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            logEntries.unshift({ timestamp, level, message });
+            // Truncate logs to prevent excessive memory use
+            if (logEntries.length > MAX_LOG_LINES) {
+                logEntries.length = MAX_LOG_LINES;
+            }
+            renderLogOutput();
+        };
+
+        /**
+         * Renders the log entries into the terminal output area.
+         */
+        const renderLogOutput = () => {
+            const logOutput = document.getElementById('log-output');
+            if (!logOutput) return;
+
+            // Clear existing log content
+            logOutput.innerHTML = '';
+
+            logEntries.forEach(entry => {
+                let colorClass = 'text-gray-400';
+                switch (entry.level) {
+                    case 'WARN': colorClass = 'text-yellow-400'; break;
+                    case 'ERROR': colorClass = 'text-red-500'; break;
+                    case 'SUCCESS': colorClass = 'text-neon-blue'; break;
+                    case 'SCAN': colorClass = 'text-blue-400'; break;
+                    case 'INFO':
+                    default: colorClass = 'text-gray-400'; break;
+                }
+
+                const logLine = document.createElement('div');
+                logLine.className = `font-mono text-xs mb-0.5`;
+                logLine.innerHTML = `
+                    <span class="text-gray-500">[${entry.timestamp}]</span>
+                    <span class="${colorClass} font-bold">${entry.level.padEnd(7)}</span>
+                    <span class="text-white">${entry.message}</span>
+                `;
+                logOutput.appendChild(logLine);
+            });
+            // Auto-scroll to the top (new logs are added unshift)
+            logOutput.scrollTop = 0;
+        };
+
+        /**
+         * Gets the Firestore collection path for user-specific devices.
+         * @returns {string} The full Firestore path.
+         */
+        const getDeviceCollectionPath = () => {
+            if (!currentUserId || !appId) {
+                throw new Error("User ID or App ID is not set for Firestore path.");
+            }
+            // Private data path structure
+            return `artifacts/${appId}/users/${currentUserId}/devices`;
+        };
+
+        /**
+         * Initializes Firebase and handles authentication.
+         */
+        const initializeFirebase = async () => {
+            try {
+                if (!firebaseConfig) {
+                    appendLog("FIREBASE ERROR: Configuration missing. App will run in memory only.", 'ERROR');
+                    return;
+                }
+
+                setLogLevel('error'); // Set log level to reduce console noise
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                appendLog("Firebase initialized. Awaiting authentication...", 'INFO');
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        currentUserId = user.uid;
+                        document.getElementById('user-id-display').textContent = currentUserId;
+                        appendLog(`Authenticated successfully. User ID: ${currentUserId}`, 'SUCCESS');
+                        isAuthReady = true;
+                        // Start listening for device changes after successful auth
+                        listenForDevices();
+                        // Initial UI rendering
+                        renderDeviceList();
+                    } else {
+                        // Sign in with custom token or anonymously
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    }
+                });
+            } catch (error) {
+                appendLog(`Firebase Initialization Failed: ${error.message}`, 'ERROR');
+                // Fallback to memory-only operation if auth fails
+                document.getElementById('user-id-display').textContent = 'ANONYMOUS/MEMORY';
+                isAuthReady = true;
+                renderDeviceList();
+            }
+        };
+
+        /**
+         * Sets up a real-time listener for the devices collection.
+         */
+        const listenForDevices = () => {
+            if (!db || !currentUserId) return;
+
+            const devicesCol = collection(db, getDeviceCollectionPath());
+            appendLog(`Listening for device updates at: ${getDeviceCollectionPath()}`, 'INFO');
+
+            onSnapshot(devicesCol, (snapshot) => {
+                deviceList = snapshot.docs.map(doc => ({
+                    id: doc.id,
+                    ...doc.data(),
+                    // Ensure essential fields exist
+                    ipAddress: doc.data().ipAddress || '0.0.0.0',
+                    name: doc.data().name || 'Unknown Device',
+                    status: doc.data().status || 'Offline',
+                    macAddress: doc.data().macAddress || generateMacAddress(),
+                    timestamp: doc.data().timestamp ? doc.data().timestamp.toDate().toLocaleString() : 'N/A'
+                }));
+                appendLog(`Fetched ${deviceList.length} devices from Firestore.`, 'SUCCESS');
+                renderDeviceList();
+            }, (error) => {
+                appendLog(`Firestore Listener Error: ${error.message}`, 'ERROR');
+            });
+        };
+
+        /**
+         * Adds a new device configuration to Firestore.
+         * @param {string} name - Device name.
+         * @param {string} ipAddress - IP address.
+         * @param {string} macAddress - MAC address.
+         */
+        const addDevice = async (name, ipAddress, macAddress) => {
+            if (!isAuthReady || !db) {
+                appendLog("Cannot add device: Firebase is not ready or configured.", 'ERROR');
+                // Add to temporary list if Firebase is down
+                deviceList.push({
+                    id: Date.now().toString(),
+                    name,
+                    ipAddress,
+                    macAddress,
+                    status: 'Unknown',
+                    timestamp: new Date().toLocaleString()
+                });
+                renderDeviceList();
+                return;
+            }
+
+            try {
+                const docRef = await addDoc(collection(db, getDeviceCollectionPath()), {
+                    name,
+                    ipAddress,
+                    macAddress,
+                    status: 'Offline',
+                    timestamp: serverTimestamp()
+                });
+                appendLog(`Device '${name}' added with ID: ${docRef.id}`, 'SUCCESS');
+                // The onSnapshot listener will update the list
+            } catch (error) {
+                appendLog(`Failed to add device: ${error.message}`, 'ERROR');
+            }
+        };
+
+        /**
+         * Deletes a device configuration from Firestore.
+         * @param {string} deviceId - The Firestore document ID.
+         */
+        const deleteDevice = async (deviceId) => {
+            if (!isAuthReady || !db) {
+                appendLog("Cannot delete device: Firebase is not ready or configured.", 'ERROR');
+                // For memory-only mode
+                deviceList = deviceList.filter(d => d.id !== deviceId);
+                renderDeviceList();
+                return;
+            }
+
+            try {
+                await deleteDoc(doc(db, getDeviceCollectionPath(), deviceId));
+                appendLog(`Device configuration deleted (ID: ${deviceId}).`, 'WARN');
+                // The onSnapshot listener will update the list
+            } catch (error) {
+                appendLog(`Failed to delete device: ${error.message}`, 'ERROR');
+            }
+        };
+
+        /**
+         * Updates the status of a device in Firestore.
+         * @param {string} deviceId - The Firestore document ID.
+         * @param {string} newStatus - 'Online', 'Offline', or 'Scanning'.
+         */
+        const updateDeviceStatus = async (deviceId, newStatus) => {
+            if (!db || !isAuthReady) return; // Silent return for updates if DB is offline
+
+            try {
+                await updateDoc(doc(db, getDeviceCollectionPath(), deviceId), {
+                    status: newStatus,
+                    lastSeen: serverTimestamp()
+                });
+                // The onSnapshot listener will handle the UI update
+            } catch (error) {
+                // If update fails, log error but don't halt
+                console.error(`Error updating device ${deviceId}: ${error.message}`);
+            }
+        };
+
+        /**
+         * Simulation of ping and port check logic.
+         * @param {object} device - The device object.
+         * @returns {Promise<string>} New status ('Online' or 'Offline').
+         */
+        const simulatedDeviceCheck = async (device) => {
+            const delay = Math.floor(Math.random() * 800) + 200; // 200ms to 1000ms delay
+            await new Promise(resolve => setTimeout(resolve, delay));
+
+            // 70% chance of being online
+            const isOnline = Math.random() < 0.7;
+
+            if (isOnline) {
+                const ports = [80, 443, 22, 3389, 8080];
+                const openPorts = ports.filter(() => Math.random() < 0.6); // 60% chance port is open
+
+                if (openPorts.length > 0) {
+                    appendLog(`Ping ${device.ipAddress} - SUCCESS (Ports: ${openPorts.join(', ')} open)`, 'SCAN');
+                } else {
+                    appendLog(`Ping ${device.ipAddress} - SUCCESS (All common ports closed)`, 'SCAN');
+                }
+                return 'Online';
+            } else {
+                appendLog(`Ping ${device.ipAddress} - TIMEOUT/FAILURE`, 'SCAN');
+                return 'Offline';
+            }
+        };
+
+        /**
+         * Main function to simulate a network scan across all configured devices.
+         */
+        const runNetworkScan = async () => {
+            if (isScanning) {
+                appendLog("Scan already in progress. Please wait.", 'WARN');
+                return;
+            }
+
+            isScanning = true;
+            document.getElementById('scan-btn').classList.add('opacity-50', 'cursor-not-allowed');
+            document.getElementById('scan-icon').setAttribute('data-lucide', 'rotate-cw');
+            lucide.createIcons();
+            appendLog(`--- Starting Network Scan (${deviceList.length} Devices) ---`, 'INFO');
+
+            // Copy the list to prevent mutation during iteration
+            const devicesToScan = [...deviceList];
+
+            for (const device of devicesToScan) {
+                // 1. Set status to Scanning (if Firestore is available, this will update the global list)
+                if (db) {
+                    await updateDeviceStatus(device.id, 'Scanning');
+                } else {
+                     // Update local list if memory-only mode
+                    const localDevice = deviceList.find(d => d.id === device.id);
+                    if (localDevice) localDevice.status = 'Scanning';
+                    renderDeviceList();
+                }
+
+                appendLog(`Scanning device: ${device.name} (${device.ipAddress})`, 'SCAN');
+
+                // 2. Run simulation
+                const newStatus = await simulatedDeviceCheck(device);
+
+                // 3. Update final status
+                if (db) {
+                    await updateDeviceStatus(device.id, newStatus);
+                } else {
+                    const localDevice = deviceList.find(d => d.id === device.id);
+                    if (localDevice) localDevice.status = newStatus;
+                    renderDeviceList();
+                }
+
+                appendLog(`Device ${device.name} is now ${newStatus.toUpperCase()}`, 'SUCCESS');
+            }
+
+            isScanning = false;
+            document.getElementById('scan-btn').classList.remove('opacity-50', 'cursor-not-allowed');
+            document.getElementById('scan-icon').setAttribute('data-lucide', 'refresh-cw');
+            lucide.createIcons();
+            appendLog("--- Network Scan Complete ---", 'INFO');
+        };
+
+        /**
+         * Renders the current list of devices into the sidebar UI.
+         */
+        const renderDeviceList = () => {
+            const listContainer = document.getElementById('device-list-container');
+            if (!listContainer) return;
+            listContainer.innerHTML = '';
+
+            if (deviceList.length === 0) {
+                listContainer.innerHTML = `
+                    <div class="p-4 text-center text-gray-500">
+                        <svg data-lucide="server-off" class="w-8 h-8 mx-auto mb-2 text-gray-600"></svg>
+                        <p class="text-sm">No configured devices. Click "Add Device" to begin.</p>
+                    </div>
+                `;
+                lucide.createIcons();
+                return;
+            }
+
+            deviceList.forEach(device => {
+                let statusClass = 'dot-offline bg-red-500';
+                let statusText = 'Offline';
+
+                switch (device.status) {
+                    case 'Online':
+                        statusClass = 'dot-online bg-neon-blue';
+                        statusText = 'Online';
+                        break;
+                    case 'Scanning':
+                        statusClass = 'dot-scanning bg-yellow-500';
+                        statusText = 'Scanning';
+                        break;
+                    case 'Offline':
+                    default:
+                        statusClass = 'dot-offline bg-red-500';
+                        statusText = 'Offline';
+                        break;
+                }
+
+                const deviceElement = document.createElement('div');
+                deviceElement.className = 'p-3 bg-gray-800 rounded-lg shadow-md mb-2 border border-gray-700 hover:border-neon-blue transition duration-200';
+                deviceElement.innerHTML = `
+                    <div class="flex justify-between items-start">
+                        <div class="flex-grow">
+                            <p class="font-semibold text-lg text-white truncate">${device.name}</p>
+                            <p class="text-xs text-gray-400 font-mono">${device.ipAddress}</p>
+                        </div>
+                        <div class="flex-shrink-0 ml-3">
+                            <button onclick="deleteDevice('${device.id}')"
+                                class="text-red-400 hover:text-red-500 transition duration-150 p-1 rounded-full hover:bg-gray-700"
+                                aria-label="Delete device">
+                                <svg data-lucide="x" class="w-4 h-4"></svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="mt-2 text-sm flex items-center justify-between">
+                        <span class="flex items-center">
+                            <span class="status-dot ${statusClass}"></span>
+                            <span class="text-gray-300 font-medium">${statusText}</span>
+                        </span>
+                        <span class="text-xs text-gray-500">MAC: ${device.macAddress}</span>
+                    </div>
+                `;
+                listContainer.appendChild(deviceElement);
+            });
+            lucide.createIcons();
+        };
+
+        /**
+         * Handles the form submission for adding a new device.
+         * @param {Event} e - The form event.
+         */
+        const handleAddDeviceSubmit = (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const name = form.deviceName.value.trim();
+            const ipAddress = form.deviceIp.value.trim();
+
+            if (!name || !ipAddress) {
+                appendLog("Device Name and IP Address are required.", 'WARN');
+                return;
+            }
+
+            // Simple IP validation (not comprehensive, but good enough for simulation)
+            const ipPattern = /^(\d{1,3}\.){3}\d{1,3}$/;
+            if (!ipPattern.test(ipAddress)) {
+                appendLog("Invalid IP Address format. Use XXX.XXX.XXX.XXX.", 'ERROR');
+                return;
+            }
+
+            const macAddress = generateMacAddress();
+            addDevice(name, ipAddress, macAddress);
+
+            // Reset form fields
+            form.reset();
+            // Close modal (simulated by hiding the container)
+            document.getElementById('add-device-modal').classList.add('hidden');
+        };
+
+        // --- Event Listeners and Initializers ---
+
+        window.onload = function () {
+            // Setup Firebase and start the app
+            initializeFirebase();
+
+            // Attach event listener for the Scan button
+            document.getElementById('scan-btn').addEventListener('click', runNetworkScan);
+
+            // Attach event listener for the Add Device form submission
+            document.getElementById('add-device-form').addEventListener('submit', handleAddDeviceSubmit);
+
+            // Modal Toggling
+            document.getElementById('open-add-modal-btn').addEventListener('click', () => {
+                document.getElementById('add-device-modal').classList.remove('hidden');
+            });
+            document.getElementById('close-add-modal-btn').addEventListener('click', () => {
+                document.getElementById('add-device-modal').classList.add('hidden');
+            });
+
+            // Expose utility functions globally for button handlers
+            window.deleteDevice = deleteDevice;
+            window.runNetworkScan = runNetworkScan;
+            window.appendLog = appendLog; // For testing/debugging
+
+            // Initial log message
+            appendLog("System Boot: Network Utility Initialized.", 'INFO');
+            appendLog(`App ID: ${appId}`, 'INFO');
+
+            // Render all Lucide icons after everything is set up
+            lucide.createIcons();
+        };
+
+        // Expose functions to the window scope for HTML event handlers
+        window.deleteDevice = deleteDevice;
+    </script>
+
+    <!-- Header / Navigation Bar -->
+    <header class="bg-gray-800 p-4 shadow-xl border-b border-neon-blue">
+        <div class="container mx-auto flex justify-between items-center">
+            <div class="text-xl font-bold text-neon-blue flex items-center">
+                <svg data-lucide="network" class="w-6 h-6 mr-2"></svg>
+                LocalNet Diagnostics v1.0
+            </div>
+            <div class="flex items-center space-x-4">
+                <button id="scan-btn"
+                    class="btn-neon-hover bg-neon-blue text-gray-900 font-semibold py-2 px-4 rounded-lg shadow-lg hover:shadow-neon-blue/50 transition duration-300 flex items-center">
+                    <svg id="scan-icon" data-lucide="refresh-cw" class="w-4 h-4 mr-2"></svg>
+                    Run Network Scan
+                </button>
+                <button id="open-add-modal-btn"
+                    class="bg-gray-700 text-gray-200 font-semibold py-2 px-4 rounded-lg hover:bg-gray-600 transition duration-300 flex items-center">
+                    <svg data-lucide="plus-circle" class="w-4 h-4 mr-2"></svg>
+                    Add Device
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content Area - Padding adjusted for subtle asymmetry (pt-6 vs pb-4) -->
+    <main class="flex-grow container mx-auto pt-6 pb-4 px-4 flex space-x-4 min-h-0">
+
+        <!-- Sidebar: Device List (1/3 Width) - Given a human touch with a subtle shadow glitch -->
+        <div class="w-full lg:w-1/3 flex flex-col bg-gray-800 p-6 rounded-xl shadow-2xl border border-gray-700 shadow-glitch">
+            <h2 class="text-2xl font-bold mb-4 text-white flex items-center border-b border-gray-700 pb-2">
+                <svg data-lucide="list-checks" class="w-5 h-5 mr-2 text-neon-blue"></svg>
+                Configured Devices
+            </h2>
+            <div id="device-list-container" class="flex-grow overflow-y-auto pr-2" style="max-height: calc(100vh - 200px);">
+                <!-- Devices will be rendered here by JavaScript -->
+                <div class="p-4 text-center text-gray-500">
+                    <svg data-lucide="loader" class="w-8 h-8 mx-auto mb-2 text-gray-600 animate-spin"></svg>
+                    <p class="text-sm">Loading configurations...</p>
+                </div>
+            </div>
+
+            <!-- Footer for User ID -->
+            <div class="mt-4 pt-4 border-t border-gray-700 text-xs text-gray-500">
+                <p>
+                    <span class="font-semibold text-gray-400">Current User:</span>
+                    <span id="user-id-display" class="font-mono text-neon-blue break-all">Authenticating...</span>
+                </p>
+                <p class="mt-1">
+                    <svg data-lucide="lock" class="w-3 h-3 inline mr-1"></svg>
+                    Data is stored privately in Firestore per user.
+                </p>
+            </div>
+        </div>
+
+        <!-- Main Panel: Network Log and Scan Output (2/3 Width) - Added CRT/Scanline effects -->
+        <div class="w-full lg:w-2/3 flex flex-col bg-dark-terminal p-6 rounded-xl shadow-2xl border border-neon-blue/50 crt-effect shadow-glitch">
+            <h2 class="text-2xl font-bold mb-4 text-neon-blue flex items-center border-b border-neon-blue pb-2">
+                <svg data-lucide="terminal" class="w-5 h-5 mr-2"></svg>
+                Network Activity Log
+            </h2>
+            <div id="log-output" class="flex-grow overflow-y-auto text-sm pr-2" style="max-height: calc(100vh - 200px); scroll-behavior: smooth;">
+                <div class="font-mono text-xs text-gray-400">
+                    <span class="text-gray-500">[00:00:00]</span> <span class="text-blue-400 font-bold">BOOT   </span> <span class="text-white">Initializing LocalNet Utility...</span>
+                </div>
+                <!-- Log entries rendered here by JavaScript -->
+            </div>
+            <div class="mt-4 pt-4 border-t border-gray-700">
+                <div class="font-mono text-xs text-neon-blue flex items-center">
+                    <span class="mr-2">&gt;</span>
+                    <input type="text" placeholder="Awaiting next scan command..." readonly
+                           class="flex-grow bg-transparent border-none focus:outline-none text-neon-blue p-0">
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Modal for Adding New Device -->
+    <div id="add-device-modal" class="hidden fixed inset-0 bg-black bg-opacity-70 z-50 flex items-center justify-center p-4">
+        <div class="bg-gray-800 p-6 rounded-xl shadow-3xl w-full max-w-md border border-neon-blue/70 shadow-glitch">
+            <div class="flex justify-between items-center border-b border-gray-700 pb-3 mb-4">
+                <h3 class="text-xl font-bold text-white flex items-center">
+                    <svg data-lucide="server" class="w-5 h-5 mr-2 text-neon-blue"></svg>
+                    Add New Network Device
+                </h3>
+                <button id="close-add-modal-btn" class="text-gray-400 hover:text-white transition duration-150 p-1 rounded-full hover:bg-gray-700">
+                    <svg data-lucide="x" class="w-6 h-6"></svg>
+                </button>
+            </div>
+
+            <form id="add-device-form">
+                <div class="mb-4">
+                    <label for="deviceName" class="block text-sm font-medium text-gray-300 mb-1">Device Name (e.g., Router, FileServer, MyPC)</label>
+                    <input type="text" id="deviceName" name="deviceName" required
+                           class="w-full p-3 rounded-lg bg-gray-700 border border-gray-600 text-white focus:border-neon-blue focus:ring focus:ring-neon-blue/50 transition duration-200"
+                           placeholder="Enter device name">
+                </div>
+                <div class="mb-6">
+                    <label for="deviceIp" class="block text-sm font-medium text-gray-300 mb-1">Simulated IP Address (e.g., 192.168.1.1)</label>
+                    <input type="text" id="deviceIp" name="deviceIp" required
+                           class="w-full p-3 rounded-lg bg-gray-700 border border-gray-600 text-white font-mono focus:border-neon-blue focus:ring focus:ring-neon-blue/50 transition duration-200"
+                           placeholder="192.168.1.XXX">
+                </div>
+                <div class="flex justify-end">
+                    <button type="submit"
+                        class="btn-neon-hover bg-neon-blue text-gray-900 font-semibold py-2 px-4 rounded-lg shadow-lg hover:shadow-neon-blue/50 transition duration-300 flex items-center">
+                        <svg data-lucide="save" class="w-4 h-4 mr-2"></svg>
+                        Save Configuration
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
