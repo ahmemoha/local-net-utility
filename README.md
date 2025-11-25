@@ -42,6 +42,8 @@
 3. **Access the app**
 Open your browser to `http://localhost:8000/network_utility.html`
 
+5. **Stop the Server:** When you are done, return to the terminal window and press `Ctrl+C`
+
 ### Alternative Methods
 **Manual Run (No Makefile):**
 
