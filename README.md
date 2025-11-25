@@ -1,3 +1,7 @@
+# Local Network Diagnostics Utility
+
+This project is a sophisticated web-based network simulation tool designed to demonstrate client-side logic, real-time database synchronization, and responsive UI design. The application renders a realistic terminal interface for managing network configurations, simulating diagnostic scans, and visualizing device states, all integrated with persistent storage.
+
 ## ✨ Features
 
 ### 🔌 Device Management
